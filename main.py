@@ -56,105 +56,55 @@ def four_point_transform(image, pts):
 
 
 def detect_document(image):
-    """Detecte les bords du document dans l'image - detection papier blanc"""
-    orig_h, orig_w = image.shape[:2]
+    """Detecte les bords du document dans l'image"""
+    orig = image.copy()
 
     # Redimensionner pour le traitement (plus rapide)
-    ratio = orig_h / 500.0
-    resized = cv2.resize(image, (int(orig_w / ratio), 500))
+    ratio = image.shape[0] / 500.0
+    image = cv2.resize(image, (int(image.shape[1] / ratio), 500))
 
     # Convertir en niveaux de gris
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Flou gaussien pour reduire le bruit
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Detection des bords avec Canny - seuils adaptatifs
+    median_val = np.median(blurred)
+    lower = int(max(0, 0.5 * median_val))
+    upper = int(min(255, 1.5 * median_val))
+    edged = cv2.Canny(blurred, lower, upper)
+
+    # Dilatation pour fermer les contours
+    kernel = np.ones((3, 3), np.uint8)
+    edged = cv2.dilate(edged, kernel, iterations=2)
+    edged = cv2.erode(edged, kernel, iterations=1)
+
+    # Trouver les contours
+    contours, _ = cv2.findContours(edged, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
 
     doc_contour = None
 
-    # === METHODE 1: Detection du papier blanc ===
-    # Le papier est generalement plus clair que le fond
-    # Seuil haut pour isoler les zones blanches/claires
-    _, white_mask = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
-
-    # Nettoyer le masque
-    kernel = np.ones((5, 5), np.uint8)
-    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
-    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-
-    contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
-
     for contour in contours:
+        # Approximer le contour
         peri = cv2.arcLength(contour, True)
-        for epsilon in [0.02, 0.03, 0.04, 0.05, 0.06]:
-            approx = cv2.approxPolyDP(contour, epsilon * peri, True)
+        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
 
-            if len(approx) == 4:
-                area = cv2.contourArea(approx)
-                img_area = resized.shape[0] * resized.shape[1]
-
-                # Au moins 10% de l'image
-                if area > img_area * 0.10:
-                    doc_contour = approx
-                    break
-
-        if doc_contour is not None:
-            break
-
-    # === METHODE 2: Canny si methode 1 echoue ===
-    if doc_contour is None:
-        for canny_low, canny_high in [(30, 100), (50, 150), (75, 200)]:
-            edged = cv2.Canny(blurred, canny_low, canny_high)
-
-            kernel = np.ones((3, 3), np.uint8)
-            edged = cv2.dilate(edged, kernel, iterations=2)
-
-            contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
-
-            for contour in contours:
-                peri = cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-
-                if len(approx) == 4:
-                    area = cv2.contourArea(approx)
-                    img_area = resized.shape[0] * resized.shape[1]
-
-                    if area > img_area * 0.10:
-                        doc_contour = approx
-                        break
-
-            if doc_contour is not None:
+        # Si le contour a 4 points et une aire significative
+        if len(approx) == 4:
+            # Verifier que l'aire est suffisante (au moins 10% de l'image)
+            area = cv2.contourArea(approx)
+            img_area = image.shape[0] * image.shape[1]
+            if area > img_area * 0.1:
+                doc_contour = approx
                 break
-
-    # === METHODE 3: Convex Hull du plus grand contour ===
-    if doc_contour is None:
-        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest = max(contours, key=cv2.contourArea)
-            hull = cv2.convexHull(largest)
-            peri = cv2.arcLength(hull, True)
-            approx = cv2.approxPolyDP(hull, 0.02 * peri, True)
-
-            if len(approx) == 4:
-                area = cv2.contourArea(approx)
-                img_area = resized.shape[0] * resized.shape[1]
-                if area > img_area * 0.10:
-                    doc_contour = approx
 
     if doc_contour is not None:
         # Remettre a l'echelle originale
         return doc_contour.reshape(4, 2) * ratio
 
     return None
-
-
-def trim_to_content(image, margin=10):
-    """Version SAFE - trim leger, ne coupe jamais le contenu"""
-    # Pour l'instant, on ne fait PAS de crop agressif
-    # On garde l'image telle quelle pour ne pas perdre d'infos
-    # TODO: Ameliorer plus tard avec une meilleure detection
-    return image
 
 
 def enhance_document(image):
@@ -178,16 +128,11 @@ def enhance_document(image):
     # Reconvertir en couleur (BGR) pour compatibilite
     result = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
-    # Cropper au plus pres du contenu
-    result = trim_to_content(result)
-
     return result
 
 
 def process_document(image_base64, enhance=True):
     """Pipeline complet de traitement du document"""
-    debug_info = {}
-
     # Decoder l'image base64
     if ',' in image_base64:
         image_base64 = image_base64.split(',')[1]
@@ -199,47 +144,28 @@ def process_document(image_base64, enhance=True):
     if image is None:
         raise ValueError("Impossible de decoder l'image")
 
-    debug_info['original_size'] = f"{image.shape[1]}x{image.shape[0]}"
-    print(f"[DEBUG] Image originale: {image.shape[1]}x{image.shape[0]}")
-
     # 1. Detecter le document
     doc_corners = detect_document(image)
 
     detected = doc_corners is not None
-    debug_info['document_detected'] = detected
 
     if doc_corners is not None:
-        print(f"[DEBUG] Document DETECTE - 4 coins trouves")
-        print(f"[DEBUG] Coins: {doc_corners.tolist()}")
         # 2. Appliquer la transformation de perspective
         warped = four_point_transform(image, doc_corners)
-        debug_info['after_transform'] = f"{warped.shape[1]}x{warped.shape[0]}"
-        print(f"[DEBUG] Apres transform: {warped.shape[1]}x{warped.shape[0]}")
     else:
-        print(f"[DEBUG] Document NON DETECTE - fallback trim_to_content")
-        # Pas de document detecte - cropper quand meme au contenu
-        warped = trim_to_content(image)
-        debug_info['after_fallback_trim'] = f"{warped.shape[1]}x{warped.shape[0]}"
-        print(f"[DEBUG] Apres fallback trim: {warped.shape[1]}x{warped.shape[0]}")
+        # Pas de document detecte - utiliser l'image telle quelle
+        warped = image
 
     # 3. Ameliorer l'image (optionnel)
     if enhance:
         result = enhance_document(warped)
-        debug_info['after_enhance'] = f"{result.shape[1]}x{result.shape[0]}"
-        print(f"[DEBUG] Apres enhance: {result.shape[1]}x{result.shape[0]}")
     else:
-        # Meme sans enhance, cropper au contenu
-        result = trim_to_content(warped)
-        debug_info['after_final_trim'] = f"{result.shape[1]}x{result.shape[0]}"
-        print(f"[DEBUG] Apres final trim: {result.shape[1]}x{result.shape[0]}")
+        result = warped
 
     # 4. Encoder en base64 (JPEG haute qualite)
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, 95]
     _, buffer = cv2.imencode('.jpg', result, encode_params)
     result_base64 = base64.b64encode(buffer).decode('utf-8')
-
-    print(f"[DEBUG] Final: {result.shape[1]}x{result.shape[0]}")
-    print(f"[DEBUG] Reduction: {image.shape[1]}x{image.shape[0]} -> {result.shape[1]}x{result.shape[0]}")
 
     return {
         'processedImage': f"data:image/jpeg;base64,{result_base64}",
@@ -248,7 +174,6 @@ def process_document(image_base64, enhance=True):
         'originalHeight': image.shape[0],
         'processedWidth': result.shape[1],
         'processedHeight': result.shape[0],
-        'debug': debug_info,
     }
 
 
@@ -325,68 +250,6 @@ def detect():
             'success': False,
             'error': str(e)
         }), 500
-
-
-@app.route('/debug', methods=['POST'])
-def debug_scan():
-    """Endpoint de debug - retourne les infos sans l'image"""
-    try:
-        data = request.get_json()
-
-        if not data or 'image' not in data:
-            return jsonify({'error': 'Image manquante'}), 400
-
-        image_base64 = data['image']
-        if ',' in image_base64:
-            image_base64 = image_base64.split(',')[1]
-
-        image_bytes = base64.b64decode(image_base64)
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if image is None:
-            return jsonify({'error': 'Image invalide'}), 400
-
-        h, w = image.shape[:2]
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-        # Analyse de l'image
-        analysis = {
-            'dimensions': f"{w}x{h}",
-            'luminosity': {
-                'min': int(gray.min()),
-                'max': int(gray.max()),
-                'mean': float(gray.mean()),
-                'std': float(gray.std()),
-            },
-            'corners_sample': {
-                'top_left_10x10': float(gray[0:10, 0:10].mean()),
-                'top_right_10x10': float(gray[0:10, w-10:w].mean()),
-                'bottom_left_10x10': float(gray[h-10:h, 0:10].mean()),
-                'bottom_right_10x10': float(gray[h-10:h, w-10:w].mean()),
-                'center_50x50': float(gray[h//2-25:h//2+25, w//2-25:w//2+25].mean()),
-            }
-        }
-
-        # Test detection document
-        doc_corners = detect_document(image)
-        analysis['document_detected'] = doc_corners is not None
-        if doc_corners is not None:
-            analysis['document_corners'] = doc_corners.tolist()
-
-        # Test seuils
-        for thresh in [180, 200, 220, 235]:
-            _, mask = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)
-            pct = 100 * np.sum(mask > 0) / (h * w)
-            analysis[f'pixels_above_{thresh}'] = f"{pct:.1f}%"
-
-        return jsonify({
-            'success': True,
-            'analysis': analysis
-        })
-
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 if __name__ == '__main__':
