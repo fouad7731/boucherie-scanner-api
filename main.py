@@ -107,6 +107,42 @@ def detect_document(image):
     return None
 
 
+def trim_white_borders(image, threshold=250, margin=5):
+    """Supprime les bordures blanches autour du document"""
+    # Convertir en niveaux de gris si necessaire
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+
+    # Inverser (le contenu devient blanc, le fond devient noir)
+    inverted = cv2.bitwise_not(gray)
+
+    # Seuil pour detecter le contenu (tout ce qui n'est pas blanc)
+    _, thresh = cv2.threshold(inverted, 255 - threshold, 255, cv2.THRESH_BINARY)
+
+    # Trouver les pixels non-zero (le contenu)
+    coords = cv2.findNonZero(thresh)
+
+    if coords is not None:
+        # Obtenir le rectangle englobant
+        x, y, w, h = cv2.boundingRect(coords)
+
+        # Ajouter une petite marge
+        x = max(0, x - margin)
+        y = max(0, y - margin)
+        w = min(image.shape[1] - x, w + 2 * margin)
+        h = min(image.shape[0] - y, h + 2 * margin)
+
+        # Cropper l'image
+        if len(image.shape) == 3:
+            return image[y:y+h, x:x+w]
+        else:
+            return image[y:y+h, x:x+w]
+
+    return image
+
+
 def enhance_document(image):
     """Ameliore l'image pour une meilleure lisibilite"""
     # Convertir en niveaux de gris
@@ -127,6 +163,9 @@ def enhance_document(image):
 
     # Reconvertir en couleur (BGR) pour compatibilite
     result = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+
+    # Supprimer les bordures blanches
+    result = trim_white_borders(result)
 
     return result
 
