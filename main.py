@@ -149,38 +149,52 @@ def detect_document(image):
     return None
 
 
-def trim_white_borders(image, threshold=250, margin=5):
-    """Supprime les bordures blanches autour du document"""
-    # Convertir en niveaux de gris si necessaire
+def trim_white_borders(image, margin=3):
+    """Supprime les bordures blanches autour du document - version aggressive"""
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         gray = image.copy()
 
-    # Inverser (le contenu devient blanc, le fond devient noir)
-    inverted = cv2.bitwise_not(gray)
+    h, w = gray.shape
 
-    # Seuil pour detecter le contenu (tout ce qui n'est pas blanc)
-    _, thresh = cv2.threshold(inverted, 255 - threshold, 255, cv2.THRESH_BINARY)
+    # Methode 1: Detection par gradient (bords du contenu)
+    # Detecte les transitions de couleur = bords du texte/contenu
+    grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    gradient = np.sqrt(grad_x**2 + grad_y**2)
+    gradient = (gradient / gradient.max() * 255).astype(np.uint8)
 
-    # Trouver les pixels non-zero (le contenu)
-    coords = cv2.findNonZero(thresh)
+    # Seuil bas pour detecter meme les petits bords
+    _, edge_mask = cv2.threshold(gradient, 15, 255, cv2.THRESH_BINARY)
 
-    if coords is not None:
-        # Obtenir le rectangle englobant
-        x, y, w, h = cv2.boundingRect(coords)
+    # Methode 2: Detection par contraste (zones non-blanches)
+    # Tout ce qui n'est pas presque blanc (< 240)
+    _, content_mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
 
-        # Ajouter une petite marge
+    # Combiner les deux masques
+    combined = cv2.bitwise_or(edge_mask, content_mask)
+
+    # Nettoyer le bruit
+    kernel = np.ones((3, 3), np.uint8)
+    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel, iterations=2)
+    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    # Trouver le rectangle englobant du contenu
+    coords = cv2.findNonZero(combined)
+
+    if coords is not None and len(coords) > 100:  # Au moins 100 pixels de contenu
+        x, y, bw, bh = cv2.boundingRect(coords)
+
+        # Marge minimale (3px par defaut)
         x = max(0, x - margin)
         y = max(0, y - margin)
-        w = min(image.shape[1] - x, w + 2 * margin)
-        h = min(image.shape[0] - y, h + 2 * margin)
+        bw = min(w - x, bw + 2 * margin)
+        bh = min(h - y, bh + 2 * margin)
 
-        # Cropper l'image
-        if len(image.shape) == 3:
-            return image[y:y+h, x:x+w]
-        else:
-            return image[y:y+h, x:x+w]
+        # Ne pas cropper si le resultat serait trop petit (< 50% de l'original)
+        if bw > w * 0.5 and bh > h * 0.5:
+            return image[y:y+bh, x:x+bw] if len(image.shape) == 3 else gray[y:y+bh, x:x+bw]
 
     return image
 
