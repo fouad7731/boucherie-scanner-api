@@ -56,49 +56,86 @@ def four_point_transform(image, pts):
 
 
 def detect_document(image):
-    """Detecte les bords du document dans l'image"""
+    """Detecte les bords du document dans l'image - algorithme ameliore"""
     orig = image.copy()
+    orig_h, orig_w = image.shape[:2]
 
     # Redimensionner pour le traitement (plus rapide)
-    ratio = image.shape[0] / 500.0
-    image = cv2.resize(image, (int(image.shape[1] / ratio), 500))
+    ratio = orig_h / 500.0
+    image = cv2.resize(image, (int(orig_w / ratio), 500))
 
     # Convertir en niveaux de gris
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    # Flou gaussien pour reduire le bruit
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Detection des bords avec Canny - seuils adaptatifs
-    median_val = np.median(blurred)
-    lower = int(max(0, 0.5 * median_val))
-    upper = int(min(255, 1.5 * median_val))
-    edged = cv2.Canny(blurred, lower, upper)
-
-    # Dilatation pour fermer les contours
-    kernel = np.ones((3, 3), np.uint8)
-    edged = cv2.dilate(edged, kernel, iterations=2)
-    edged = cv2.erode(edged, kernel, iterations=1)
-
-    # Trouver les contours
-    contours, _ = cv2.findContours(edged, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
-
+    # Plusieurs methodes de detection pour plus de robustesse
     doc_contour = None
 
-    for contour in contours:
-        # Approximer le contour
-        peri = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+    # Methode 1: Detection par seuillage adaptatif (marche bien pour papier blanc)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                    cv2.THRESH_BINARY, 11, 2)
+    thresh = cv2.bitwise_not(thresh)
 
-        # Si le contour a 4 points et une aire significative
-        if len(approx) == 4:
-            # Verifier que l'aire est suffisante (au moins 10% de l'image)
-            area = cv2.contourArea(approx)
-            img_area = image.shape[0] * image.shape[1]
-            if area > img_area * 0.1:
-                doc_contour = approx
+    # Methode 2: Canny avec plusieurs seuils
+    for canny_low, canny_high in [(20, 50), (30, 100), (50, 150)]:
+        edged = cv2.Canny(blurred, canny_low, canny_high)
+
+        # Dilatation pour fermer les contours
+        kernel = np.ones((5, 5), np.uint8)
+        edged = cv2.dilate(edged, kernel, iterations=2)
+        edged = cv2.erode(edged, kernel, iterations=1)
+
+        # Trouver les contours
+        contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
+
+        for contour in contours:
+            # Approximer le contour avec tolerance variable
+            peri = cv2.arcLength(contour, True)
+            for epsilon in [0.02, 0.03, 0.04, 0.05]:
+                approx = cv2.approxPolyDP(contour, epsilon * peri, True)
+
+                # Si le contour a 4 points
+                if len(approx) == 4:
+                    area = cv2.contourArea(approx)
+                    img_area = image.shape[0] * image.shape[1]
+
+                    # Au moins 5% de l'image (seuil bas pour detecter meme les petits docs)
+                    if area > img_area * 0.05:
+                        # Verifier que c'est un quadrilatere convexe
+                        if cv2.isContourConvex(approx):
+                            doc_contour = approx
+                            break
+
+            if doc_contour is not None:
                 break
+
+        if doc_contour is not None:
+            break
+
+    # Methode 3: Si toujours pas trouve, essayer avec morphologie
+    if doc_contour is None:
+        # Seuillage Otsu
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        binary = cv2.bitwise_not(binary)
+
+        # Morphologie pour nettoyer
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+
+        for contour in contours:
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+
+            if len(approx) == 4:
+                area = cv2.contourArea(approx)
+                img_area = image.shape[0] * image.shape[1]
+                if area > img_area * 0.05 and cv2.isContourConvex(approx):
+                    doc_contour = approx
+                    break
 
     if doc_contour is not None:
         # Remettre a l'echelle originale
