@@ -56,55 +56,133 @@ def four_point_transform(image, pts):
 
 
 def detect_document(image):
-    """Detecte les bords du document dans l'image"""
-    orig = image.copy()
+    """Detecte les bords du document dans l'image - detection papier blanc"""
+    orig_h, orig_w = image.shape[:2]
 
     # Redimensionner pour le traitement (plus rapide)
-    ratio = image.shape[0] / 500.0
-    image = cv2.resize(image, (int(image.shape[1] / ratio), 500))
+    ratio = orig_h / 500.0
+    resized = cv2.resize(image, (int(orig_w / ratio), 500))
 
     # Convertir en niveaux de gris
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # Flou gaussien pour reduire le bruit
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Detection des bords avec Canny - seuils adaptatifs
-    median_val = np.median(blurred)
-    lower = int(max(0, 0.5 * median_val))
-    upper = int(min(255, 1.5 * median_val))
-    edged = cv2.Canny(blurred, lower, upper)
-
-    # Dilatation pour fermer les contours
-    kernel = np.ones((3, 3), np.uint8)
-    edged = cv2.dilate(edged, kernel, iterations=2)
-    edged = cv2.erode(edged, kernel, iterations=1)
-
-    # Trouver les contours
-    contours, _ = cv2.findContours(edged, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
 
     doc_contour = None
 
-    for contour in contours:
-        # Approximer le contour
-        peri = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+    # === METHODE 1: Detection du papier blanc ===
+    # Le papier est generalement plus clair que le fond
+    # Seuil haut pour isoler les zones blanches/claires
+    _, white_mask = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
 
-        # Si le contour a 4 points et une aire significative
-        if len(approx) == 4:
-            # Verifier que l'aire est suffisante (au moins 10% de l'image)
-            area = cv2.contourArea(approx)
-            img_area = image.shape[0] * image.shape[1]
-            if area > img_area * 0.1:
-                doc_contour = approx
+    # Nettoyer le masque
+    kernel = np.ones((5, 5), np.uint8)
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+
+    for contour in contours:
+        peri = cv2.arcLength(contour, True)
+        for epsilon in [0.02, 0.03, 0.04, 0.05, 0.06]:
+            approx = cv2.approxPolyDP(contour, epsilon * peri, True)
+
+            if len(approx) == 4:
+                area = cv2.contourArea(approx)
+                img_area = resized.shape[0] * resized.shape[1]
+
+                # Au moins 10% de l'image
+                if area > img_area * 0.10:
+                    doc_contour = approx
+                    break
+
+        if doc_contour is not None:
+            break
+
+    # === METHODE 2: Canny si methode 1 echoue ===
+    if doc_contour is None:
+        for canny_low, canny_high in [(30, 100), (50, 150), (75, 200)]:
+            edged = cv2.Canny(blurred, canny_low, canny_high)
+
+            kernel = np.ones((3, 3), np.uint8)
+            edged = cv2.dilate(edged, kernel, iterations=2)
+
+            contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
+
+            for contour in contours:
+                peri = cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+
+                if len(approx) == 4:
+                    area = cv2.contourArea(approx)
+                    img_area = resized.shape[0] * resized.shape[1]
+
+                    if area > img_area * 0.10:
+                        doc_contour = approx
+                        break
+
+            if doc_contour is not None:
                 break
+
+    # === METHODE 3: Convex Hull du plus grand contour ===
+    if doc_contour is None:
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            hull = cv2.convexHull(largest)
+            peri = cv2.arcLength(hull, True)
+            approx = cv2.approxPolyDP(hull, 0.02 * peri, True)
+
+            if len(approx) == 4:
+                area = cv2.contourArea(approx)
+                img_area = resized.shape[0] * resized.shape[1]
+                if area > img_area * 0.10:
+                    doc_contour = approx
 
     if doc_contour is not None:
         # Remettre a l'echelle originale
         return doc_contour.reshape(4, 2) * ratio
 
     return None
+
+
+def trim_white_borders(image, threshold=250, margin=5):
+    """Supprime les bordures blanches autour du document"""
+    # Convertir en niveaux de gris si necessaire
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+
+    # Inverser (le contenu devient blanc, le fond devient noir)
+    inverted = cv2.bitwise_not(gray)
+
+    # Seuil pour detecter le contenu (tout ce qui n'est pas blanc)
+    _, thresh = cv2.threshold(inverted, 255 - threshold, 255, cv2.THRESH_BINARY)
+
+    # Trouver les pixels non-zero (le contenu)
+    coords = cv2.findNonZero(thresh)
+
+    if coords is not None:
+        # Obtenir le rectangle englobant
+        x, y, w, h = cv2.boundingRect(coords)
+
+        # Ajouter une petite marge
+        x = max(0, x - margin)
+        y = max(0, y - margin)
+        w = min(image.shape[1] - x, w + 2 * margin)
+        h = min(image.shape[0] - y, h + 2 * margin)
+
+        # Cropper l'image
+        if len(image.shape) == 3:
+            return image[y:y+h, x:x+w]
+        else:
+            return image[y:y+h, x:x+w]
+
+    return image
 
 
 def enhance_document(image):
@@ -127,6 +205,9 @@ def enhance_document(image):
 
     # Reconvertir en couleur (BGR) pour compatibilite
     result = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+
+    # Supprimer les bordures blanches
+    result = trim_white_borders(result)
 
     return result
 
