@@ -149,8 +149,8 @@ def detect_document(image):
     return None
 
 
-def trim_white_borders(image, margin=3):
-    """Supprime les bordures blanches autour du document - version aggressive"""
+def trim_to_content(image, margin=2):
+    """Crop au plus pres du contenu reel - ULTRA AGGRESSIVE"""
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
@@ -158,43 +158,71 @@ def trim_white_borders(image, margin=3):
 
     h, w = gray.shape
 
-    # Methode 1: Detection par gradient (bords du contenu)
-    # Detecte les transitions de couleur = bords du texte/contenu
-    grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-    gradient = np.sqrt(grad_x**2 + grad_y**2)
-    gradient = (gradient / gradient.max() * 255).astype(np.uint8)
+    # === ETAPE 1: Detecter le papier blanc (zone claire) ===
+    # Le papier est generalement > 200 en luminosite
+    _, paper_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
 
-    # Seuil bas pour detecter meme les petits bords
-    _, edge_mask = cv2.threshold(gradient, 15, 255, cv2.THRESH_BINARY)
+    # Nettoyer le masque du papier
+    kernel = np.ones((5, 5), np.uint8)
+    paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+    paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_OPEN, kernel, iterations=2)
 
-    # Methode 2: Detection par contraste (zones non-blanches)
-    # Tout ce qui n'est pas presque blanc (< 240)
-    _, content_mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+    # Trouver le plus grand contour blanc = le papier
+    contours, _ = cv2.findContours(paper_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Combiner les deux masques
-    combined = cv2.bitwise_or(edge_mask, content_mask)
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        x, y, bw, bh = cv2.boundingRect(largest)
 
-    # Nettoyer le bruit
-    kernel = np.ones((3, 3), np.uint8)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel, iterations=2)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel, iterations=1)
+        # Verifier que c'est assez grand (au moins 30% de l'image)
+        if bw * bh > h * w * 0.3:
+            # Crop au papier detecte
+            x = max(0, x - margin)
+            y = max(0, y - margin)
+            bw = min(w - x, bw + 2 * margin)
+            bh = min(h - y, bh + 2 * margin)
 
-    # Trouver le rectangle englobant du contenu
-    coords = cv2.findNonZero(combined)
+            cropped = image[y:y+bh, x:x+bw] if len(image.shape) == 3 else gray[y:y+bh, x:x+bw]
 
-    if coords is not None and len(coords) > 100:  # Au moins 100 pixels de contenu
-        x, y, bw, bh = cv2.boundingRect(coords)
+            # === ETAPE 2: Affiner en cherchant le contenu (texte) ===
+            if len(cropped.shape) == 3:
+                gray2 = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+            else:
+                gray2 = cropped.copy()
 
-        # Marge minimale (3px par defaut)
-        x = max(0, x - margin)
-        y = max(0, y - margin)
-        bw = min(w - x, bw + 2 * margin)
-        bh = min(h - y, bh + 2 * margin)
+            h2, w2 = gray2.shape
 
-        # Ne pas cropper si le resultat serait trop petit (< 50% de l'original)
-        if bw > w * 0.5 and bh > h * 0.5:
-            return image[y:y+bh, x:x+bw] if len(image.shape) == 3 else gray[y:y+bh, x:x+bw]
+            # Detecter le texte/contenu (tout ce qui n'est pas blanc)
+            _, content = cv2.threshold(gray2, 235, 255, cv2.THRESH_BINARY_INV)
+
+            # Scanner pour trouver les vraies bordures du contenu
+            row_has_content = np.any(content > 0, axis=1)
+            col_has_content = np.any(content > 0, axis=0)
+
+            rows = np.where(row_has_content)[0]
+            cols = np.where(col_has_content)[0]
+
+            if len(rows) > 10 and len(cols) > 10:
+                top = max(0, rows[0] - margin)
+                bottom = min(h2, rows[-1] + margin + 1)
+                left = max(0, cols[0] - margin)
+                right = min(w2, cols[-1] + margin + 1)
+
+                return cropped[top:bottom, left:right] if len(cropped.shape) == 3 else gray2[top:bottom, left:right]
+
+            return cropped
+
+    # Fallback: juste trimmer les bords blancs standards
+    _, binary = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY_INV)
+    rows = np.where(np.any(binary > 0, axis=1))[0]
+    cols = np.where(np.any(binary > 0, axis=0))[0]
+
+    if len(rows) > 0 and len(cols) > 0:
+        top = max(0, rows[0] - margin)
+        bottom = min(h, rows[-1] + margin + 1)
+        left = max(0, cols[0] - margin)
+        right = min(w, cols[-1] + margin + 1)
+        return image[top:bottom, left:right] if len(image.shape) == 3 else gray[top:bottom, left:right]
 
     return image
 
@@ -220,8 +248,8 @@ def enhance_document(image):
     # Reconvertir en couleur (BGR) pour compatibilite
     result = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
-    # Supprimer les bordures blanches
-    result = trim_white_borders(result)
+    # Cropper au plus pres du contenu
+    result = trim_to_content(result)
 
     return result
 
@@ -248,14 +276,15 @@ def process_document(image_base64, enhance=True):
         # 2. Appliquer la transformation de perspective
         warped = four_point_transform(image, doc_corners)
     else:
-        # Pas de document detecte - utiliser l'image telle quelle
-        warped = image
+        # Pas de document detecte - cropper quand meme au contenu
+        warped = trim_to_content(image)
 
     # 3. Ameliorer l'image (optionnel)
     if enhance:
         result = enhance_document(warped)
     else:
-        result = warped
+        # Meme sans enhance, cropper au contenu
+        result = trim_to_content(warped)
 
     # 4. Encoder en base64 (JPEG haute qualite)
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, 95]
