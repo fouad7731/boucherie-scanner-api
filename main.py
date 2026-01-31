@@ -163,11 +163,27 @@ def trim_to_content(image, margin=2):
     # Stats de l'image pour debug
     print(f"[TRIM] Luminosite - min:{gray.min()} max:{gray.max()} mean:{gray.mean():.0f}")
 
+    # Analyser les coins vs centre pour determiner le seuil optimal
+    corner_lum = np.mean([
+        gray[0:20, 0:20].mean(),
+        gray[0:20, w-20:w].mean(),
+        gray[h-20:h, 0:20].mean(),
+        gray[h-20:h, w-20:w].mean()
+    ])
+    center_lum = gray[h//4:3*h//4, w//4:3*w//4].mean()
+    print(f"[TRIM] Coins: {corner_lum:.0f}, Centre: {center_lum:.0f}")
+
+    # Seuil adaptatif: moyenne entre coins et centre
+    # Si coins=196 et centre=230, seuil = (196+230)/2 = 213
+    adaptive_thresh = int((corner_lum + center_lum) / 2) + 5
+    adaptive_thresh = max(200, min(230, adaptive_thresh))  # Borner entre 200-230
+    print(f"[TRIM] Seuil adaptatif: {adaptive_thresh}")
+
     # === ETAPE 1: Detecter le papier blanc (zone claire) ===
-    _, paper_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    _, paper_mask = cv2.threshold(gray, adaptive_thresh, 255, cv2.THRESH_BINARY)
     paper_pixels = np.sum(paper_mask > 0)
     total_pixels = h * w
-    print(f"[TRIM] Pixels blancs (>200): {paper_pixels} / {total_pixels} = {100*paper_pixels/total_pixels:.1f}%")
+    print(f"[TRIM] Pixels blancs (>{adaptive_thresh}): {paper_pixels} / {total_pixels} = {100*paper_pixels/total_pixels:.1f}%")
 
     # Nettoyer le masque du papier
     kernel = np.ones((5, 5), np.uint8)
