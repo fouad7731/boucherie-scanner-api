@@ -151,6 +151,8 @@ def detect_document(image):
 
 def trim_to_content(image, margin=2):
     """Crop au plus pres du contenu reel - ULTRA AGGRESSIVE"""
+    print(f"[TRIM] Input: {image.shape[1]}x{image.shape[0]}")
+
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
@@ -158,9 +160,14 @@ def trim_to_content(image, margin=2):
 
     h, w = gray.shape
 
+    # Stats de l'image pour debug
+    print(f"[TRIM] Luminosite - min:{gray.min()} max:{gray.max()} mean:{gray.mean():.0f}")
+
     # === ETAPE 1: Detecter le papier blanc (zone claire) ===
-    # Le papier est generalement > 200 en luminosite
     _, paper_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    paper_pixels = np.sum(paper_mask > 0)
+    total_pixels = h * w
+    print(f"[TRIM] Pixels blancs (>200): {paper_pixels} / {total_pixels} = {100*paper_pixels/total_pixels:.1f}%")
 
     # Nettoyer le masque du papier
     kernel = np.ones((5, 5), np.uint8)
@@ -169,13 +176,17 @@ def trim_to_content(image, margin=2):
 
     # Trouver le plus grand contour blanc = le papier
     contours, _ = cv2.findContours(paper_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    print(f"[TRIM] Contours blancs trouves: {len(contours)}")
 
     if contours:
         largest = max(contours, key=cv2.contourArea)
         x, y, bw, bh = cv2.boundingRect(largest)
+        area_ratio = (bw * bh) / (h * w)
+        print(f"[TRIM] Plus grand contour blanc: {bw}x{bh} a position ({x},{y}) = {100*area_ratio:.1f}% de l'image")
 
         # Verifier que c'est assez grand (au moins 30% de l'image)
         if bw * bh > h * w * 0.3:
+            print(f"[TRIM] ETAPE 1 OK - Crop au papier")
             # Crop au papier detecte
             x = max(0, x - margin)
             y = max(0, y - margin)
@@ -183,6 +194,7 @@ def trim_to_content(image, margin=2):
             bh = min(h - y, bh + 2 * margin)
 
             cropped = image[y:y+bh, x:x+bw] if len(image.shape) == 3 else gray[y:y+bh, x:x+bw]
+            print(f"[TRIM] Apres crop papier: {cropped.shape[1]}x{cropped.shape[0]}")
 
             # === ETAPE 2: Affiner en cherchant le contenu (texte) ===
             if len(cropped.shape) == 3:
@@ -194,6 +206,8 @@ def trim_to_content(image, margin=2):
 
             # Detecter le texte/contenu (tout ce qui n'est pas blanc)
             _, content = cv2.threshold(gray2, 235, 255, cv2.THRESH_BINARY_INV)
+            content_pixels = np.sum(content > 0)
+            print(f"[TRIM] Pixels contenu (<235): {content_pixels} = {100*content_pixels/(h2*w2):.1f}%")
 
             # Scanner pour trouver les vraies bordures du contenu
             row_has_content = np.any(content > 0, axis=1)
@@ -201,18 +215,26 @@ def trim_to_content(image, margin=2):
 
             rows = np.where(row_has_content)[0]
             cols = np.where(col_has_content)[0]
+            print(f"[TRIM] Lignes avec contenu: {len(rows)}, Colonnes: {len(cols)}")
 
             if len(rows) > 10 and len(cols) > 10:
                 top = max(0, rows[0] - margin)
                 bottom = min(h2, rows[-1] + margin + 1)
                 left = max(0, cols[0] - margin)
                 right = min(w2, cols[-1] + margin + 1)
+                print(f"[TRIM] ETAPE 2 OK - Crop contenu: top={top} bottom={bottom} left={left} right={right}")
 
-                return cropped[top:bottom, left:right] if len(cropped.shape) == 3 else gray2[top:bottom, left:right]
+                result = cropped[top:bottom, left:right] if len(cropped.shape) == 3 else gray2[top:bottom, left:right]
+                print(f"[TRIM] Output: {result.shape[1]}x{result.shape[0]}")
+                return result
 
+            print(f"[TRIM] ETAPE 2 SKIP - pas assez de contenu detecte")
             return cropped
+        else:
+            print(f"[TRIM] ETAPE 1 SKIP - contour trop petit ({100*area_ratio:.1f}% < 30%)")
 
     # Fallback: juste trimmer les bords blancs standards
+    print(f"[TRIM] FALLBACK - detection basique")
     _, binary = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY_INV)
     rows = np.where(np.any(binary > 0, axis=1))[0]
     cols = np.where(np.any(binary > 0, axis=0))[0]
@@ -222,8 +244,11 @@ def trim_to_content(image, margin=2):
         bottom = min(h, rows[-1] + margin + 1)
         left = max(0, cols[0] - margin)
         right = min(w, cols[-1] + margin + 1)
-        return image[top:bottom, left:right] if len(image.shape) == 3 else gray[top:bottom, left:right]
+        result = image[top:bottom, left:right] if len(image.shape) == 3 else gray[top:bottom, left:right]
+        print(f"[TRIM] Fallback output: {result.shape[1]}x{result.shape[0]}")
+        return result
 
+    print(f"[TRIM] AUCUN TRIM - retour image originale")
     return image
 
 
@@ -256,6 +281,8 @@ def enhance_document(image):
 
 def process_document(image_base64, enhance=True):
     """Pipeline complet de traitement du document"""
+    debug_info = {}
+
     # Decoder l'image base64
     if ',' in image_base64:
         image_base64 = image_base64.split(',')[1]
@@ -267,29 +294,47 @@ def process_document(image_base64, enhance=True):
     if image is None:
         raise ValueError("Impossible de decoder l'image")
 
+    debug_info['original_size'] = f"{image.shape[1]}x{image.shape[0]}"
+    print(f"[DEBUG] Image originale: {image.shape[1]}x{image.shape[0]}")
+
     # 1. Detecter le document
     doc_corners = detect_document(image)
 
     detected = doc_corners is not None
+    debug_info['document_detected'] = detected
 
     if doc_corners is not None:
+        print(f"[DEBUG] Document DETECTE - 4 coins trouves")
+        print(f"[DEBUG] Coins: {doc_corners.tolist()}")
         # 2. Appliquer la transformation de perspective
         warped = four_point_transform(image, doc_corners)
+        debug_info['after_transform'] = f"{warped.shape[1]}x{warped.shape[0]}"
+        print(f"[DEBUG] Apres transform: {warped.shape[1]}x{warped.shape[0]}")
     else:
+        print(f"[DEBUG] Document NON DETECTE - fallback trim_to_content")
         # Pas de document detecte - cropper quand meme au contenu
         warped = trim_to_content(image)
+        debug_info['after_fallback_trim'] = f"{warped.shape[1]}x{warped.shape[0]}"
+        print(f"[DEBUG] Apres fallback trim: {warped.shape[1]}x{warped.shape[0]}")
 
     # 3. Ameliorer l'image (optionnel)
     if enhance:
         result = enhance_document(warped)
+        debug_info['after_enhance'] = f"{result.shape[1]}x{result.shape[0]}"
+        print(f"[DEBUG] Apres enhance: {result.shape[1]}x{result.shape[0]}")
     else:
         # Meme sans enhance, cropper au contenu
         result = trim_to_content(warped)
+        debug_info['after_final_trim'] = f"{result.shape[1]}x{result.shape[0]}"
+        print(f"[DEBUG] Apres final trim: {result.shape[1]}x{result.shape[0]}")
 
     # 4. Encoder en base64 (JPEG haute qualite)
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, 95]
     _, buffer = cv2.imencode('.jpg', result, encode_params)
     result_base64 = base64.b64encode(buffer).decode('utf-8')
+
+    print(f"[DEBUG] Final: {result.shape[1]}x{result.shape[0]}")
+    print(f"[DEBUG] Reduction: {image.shape[1]}x{image.shape[0]} -> {result.shape[1]}x{result.shape[0]}")
 
     return {
         'processedImage': f"data:image/jpeg;base64,{result_base64}",
@@ -298,6 +343,7 @@ def process_document(image_base64, enhance=True):
         'originalHeight': image.shape[0],
         'processedWidth': result.shape[1],
         'processedHeight': result.shape[0],
+        'debug': debug_info,
     }
 
 
@@ -374,6 +420,68 @@ def detect():
             'success': False,
             'error': str(e)
         }), 500
+
+
+@app.route('/debug', methods=['POST'])
+def debug_scan():
+    """Endpoint de debug - retourne les infos sans l'image"""
+    try:
+        data = request.get_json()
+
+        if not data or 'image' not in data:
+            return jsonify({'error': 'Image manquante'}), 400
+
+        image_base64 = data['image']
+        if ',' in image_base64:
+            image_base64 = image_base64.split(',')[1]
+
+        image_bytes = base64.b64decode(image_base64)
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if image is None:
+            return jsonify({'error': 'Image invalide'}), 400
+
+        h, w = image.shape[:2]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Analyse de l'image
+        analysis = {
+            'dimensions': f"{w}x{h}",
+            'luminosity': {
+                'min': int(gray.min()),
+                'max': int(gray.max()),
+                'mean': float(gray.mean()),
+                'std': float(gray.std()),
+            },
+            'corners_sample': {
+                'top_left_10x10': float(gray[0:10, 0:10].mean()),
+                'top_right_10x10': float(gray[0:10, w-10:w].mean()),
+                'bottom_left_10x10': float(gray[h-10:h, 0:10].mean()),
+                'bottom_right_10x10': float(gray[h-10:h, w-10:w].mean()),
+                'center_50x50': float(gray[h//2-25:h//2+25, w//2-25:w//2+25].mean()),
+            }
+        }
+
+        # Test detection document
+        doc_corners = detect_document(image)
+        analysis['document_detected'] = doc_corners is not None
+        if doc_corners is not None:
+            analysis['document_corners'] = doc_corners.tolist()
+
+        # Test seuils
+        for thresh in [180, 200, 220, 235]:
+            _, mask = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)
+            pct = 100 * np.sum(mask > 0) / (h * w)
+            analysis[f'pixels_above_{thresh}'] = f"{pct:.1f}%"
+
+        return jsonify({
+            'success': True,
+            'analysis': analysis
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 if __name__ == '__main__':
