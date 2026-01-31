@@ -149,8 +149,8 @@ def detect_document(image):
     return None
 
 
-def trim_to_content(image, margin=2):
-    """Crop au plus pres du contenu reel - ULTRA AGGRESSIVE"""
+def trim_to_content(image, margin=5):
+    """Crop au contenu en detectant le TEXTE NOIR (approche inverse)"""
     print(f"[TRIM] Input: {image.shape[1]}x{image.shape[0]}")
 
     if len(image.shape) == 3:
@@ -159,112 +159,40 @@ def trim_to_content(image, margin=2):
         gray = image.copy()
 
     h, w = gray.shape
-
-    # Stats de l'image pour debug
     print(f"[TRIM] Luminosite - min:{gray.min()} max:{gray.max()} mean:{gray.mean():.0f}")
 
-    # Analyser les coins vs centre pour determiner le seuil optimal
-    corner_lum = np.mean([
-        gray[0:20, 0:20].mean(),
-        gray[0:20, w-20:w].mean(),
-        gray[h-20:h, 0:20].mean(),
-        gray[h-20:h, w-20:w].mean()
-    ])
-    center_lum = gray[h//4:3*h//4, w//4:3*w//4].mean()
-    print(f"[TRIM] Coins: {corner_lum:.0f}, Centre: {center_lum:.0f}")
+    # === APPROCHE: Detecter le TEXTE (pixels sombres) ===
+    # Le texte est noir/gris fonce (< 150)
+    # Les marges grises sont ~196, le papier blanc ~230
+    # Donc tout ce qui est < 150 = texte
 
-    # Seuil adaptatif: moyenne entre coins et centre
-    # Si coins=196 et centre=230, seuil = (196+230)/2 = 213
-    adaptive_thresh = int((corner_lum + center_lum) / 2) + 5
-    adaptive_thresh = max(200, min(230, adaptive_thresh))  # Borner entre 200-230
-    print(f"[TRIM] Seuil adaptatif: {adaptive_thresh}")
+    _, text_mask = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+    text_pixels = np.sum(text_mask > 0)
+    print(f"[TRIM] Pixels texte (<150): {text_pixels} = {100*text_pixels/(h*w):.1f}%")
 
-    # === ETAPE 1: Detecter le papier blanc (zone claire) ===
-    _, paper_mask = cv2.threshold(gray, adaptive_thresh, 255, cv2.THRESH_BINARY)
-    paper_pixels = np.sum(paper_mask > 0)
-    total_pixels = h * w
-    print(f"[TRIM] Pixels blancs (>{adaptive_thresh}): {paper_pixels} / {total_pixels} = {100*paper_pixels/total_pixels:.1f}%")
+    # Dilater le texte pour connecter les caracteres et lignes proches
+    kernel = np.ones((10, 10), np.uint8)
+    text_dilated = cv2.dilate(text_mask, kernel, iterations=3)
 
-    # Nettoyer le masque du papier
-    kernel = np.ones((5, 5), np.uint8)
-    paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
-    paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    # Trouver le bounding box du texte
+    coords = cv2.findNonZero(text_dilated)
 
-    # Trouver le plus grand contour blanc = le papier
-    contours, _ = cv2.findContours(paper_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    print(f"[TRIM] Contours blancs trouves: {len(contours)}")
+    if coords is not None and len(coords) > 100:
+        x, y, bw, bh = cv2.boundingRect(coords)
+        print(f"[TRIM] Bounding box texte: ({x},{y}) {bw}x{bh}")
 
-    if contours:
-        largest = max(contours, key=cv2.contourArea)
-        x, y, bw, bh = cv2.boundingRect(largest)
-        area_ratio = (bw * bh) / (h * w)
-        print(f"[TRIM] Plus grand contour blanc: {bw}x{bh} a position ({x},{y}) = {100*area_ratio:.1f}% de l'image")
+        # Ajouter une marge
+        x = max(0, x - margin)
+        y = max(0, y - margin)
+        bw = min(w - x, bw + 2 * margin)
+        bh = min(h - y, bh + 2 * margin)
 
-        # Verifier que c'est assez grand (au moins 30% de l'image)
-        if bw * bh > h * w * 0.3:
-            print(f"[TRIM] ETAPE 1 OK - Crop au papier")
-            # Crop au papier detecte
-            x = max(0, x - margin)
-            y = max(0, y - margin)
-            bw = min(w - x, bw + 2 * margin)
-            bh = min(h - y, bh + 2 * margin)
-
-            cropped = image[y:y+bh, x:x+bw] if len(image.shape) == 3 else gray[y:y+bh, x:x+bw]
-            print(f"[TRIM] Apres crop papier: {cropped.shape[1]}x{cropped.shape[0]}")
-
-            # === ETAPE 2: Affiner en cherchant le contenu (texte) ===
-            if len(cropped.shape) == 3:
-                gray2 = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-            else:
-                gray2 = cropped.copy()
-
-            h2, w2 = gray2.shape
-
-            # Detecter le texte/contenu (tout ce qui n'est pas blanc)
-            _, content = cv2.threshold(gray2, 235, 255, cv2.THRESH_BINARY_INV)
-            content_pixels = np.sum(content > 0)
-            print(f"[TRIM] Pixels contenu (<235): {content_pixels} = {100*content_pixels/(h2*w2):.1f}%")
-
-            # Scanner pour trouver les vraies bordures du contenu
-            row_has_content = np.any(content > 0, axis=1)
-            col_has_content = np.any(content > 0, axis=0)
-
-            rows = np.where(row_has_content)[0]
-            cols = np.where(col_has_content)[0]
-            print(f"[TRIM] Lignes avec contenu: {len(rows)}, Colonnes: {len(cols)}")
-
-            if len(rows) > 10 and len(cols) > 10:
-                top = max(0, rows[0] - margin)
-                bottom = min(h2, rows[-1] + margin + 1)
-                left = max(0, cols[0] - margin)
-                right = min(w2, cols[-1] + margin + 1)
-                print(f"[TRIM] ETAPE 2 OK - Crop contenu: top={top} bottom={bottom} left={left} right={right}")
-
-                result = cropped[top:bottom, left:right] if len(cropped.shape) == 3 else gray2[top:bottom, left:right]
-                print(f"[TRIM] Output: {result.shape[1]}x{result.shape[0]}")
-                return result
-
-            print(f"[TRIM] ETAPE 2 SKIP - pas assez de contenu detecte")
-            return cropped
-        else:
-            print(f"[TRIM] ETAPE 1 SKIP - contour trop petit ({100*area_ratio:.1f}% < 30%)")
-
-    # Fallback: juste trimmer les bords blancs standards
-    print(f"[TRIM] FALLBACK - detection basique")
-    _, binary = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY_INV)
-    rows = np.where(np.any(binary > 0, axis=1))[0]
-    cols = np.where(np.any(binary > 0, axis=0))[0]
-
-    if len(rows) > 0 and len(cols) > 0:
-        top = max(0, rows[0] - margin)
-        bottom = min(h, rows[-1] + margin + 1)
-        left = max(0, cols[0] - margin)
-        right = min(w, cols[-1] + margin + 1)
-        result = image[top:bottom, left:right] if len(image.shape) == 3 else gray[top:bottom, left:right]
-        print(f"[TRIM] Fallback output: {result.shape[1]}x{result.shape[0]}")
+        result = image[y:y+bh, x:x+bw] if len(image.shape) == 3 else gray[y:y+bh, x:x+bw]
+        print(f"[TRIM] Output: {result.shape[1]}x{result.shape[0]}")
+        print(f"[TRIM] Reduction: {w}x{h} -> {result.shape[1]}x{result.shape[0]}")
         return result
 
-    print(f"[TRIM] AUCUN TRIM - retour image originale")
+    print(f"[TRIM] Pas de texte detecte - retour image originale")
     return image
 
 
