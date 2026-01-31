@@ -149,50 +149,11 @@ def detect_document(image):
     return None
 
 
-def trim_to_content(image, margin=5):
-    """Crop au contenu en detectant le TEXTE NOIR (approche inverse)"""
-    print(f"[TRIM] Input: {image.shape[1]}x{image.shape[0]}")
-
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image.copy()
-
-    h, w = gray.shape
-    print(f"[TRIM] Luminosite - min:{gray.min()} max:{gray.max()} mean:{gray.mean():.0f}")
-
-    # === APPROCHE: Detecter le TEXTE (pixels sombres) ===
-    # Le texte est noir/gris fonce (< 150)
-    # Les marges grises sont ~196, le papier blanc ~230
-    # Donc tout ce qui est < 150 = texte
-
-    _, text_mask = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-    text_pixels = np.sum(text_mask > 0)
-    print(f"[TRIM] Pixels texte (<150): {text_pixels} = {100*text_pixels/(h*w):.1f}%")
-
-    # Dilater le texte pour connecter les caracteres et lignes proches
-    kernel = np.ones((10, 10), np.uint8)
-    text_dilated = cv2.dilate(text_mask, kernel, iterations=3)
-
-    # Trouver le bounding box du texte
-    coords = cv2.findNonZero(text_dilated)
-
-    if coords is not None and len(coords) > 100:
-        x, y, bw, bh = cv2.boundingRect(coords)
-        print(f"[TRIM] Bounding box texte: ({x},{y}) {bw}x{bh}")
-
-        # Ajouter une marge
-        x = max(0, x - margin)
-        y = max(0, y - margin)
-        bw = min(w - x, bw + 2 * margin)
-        bh = min(h - y, bh + 2 * margin)
-
-        result = image[y:y+bh, x:x+bw] if len(image.shape) == 3 else gray[y:y+bh, x:x+bw]
-        print(f"[TRIM] Output: {result.shape[1]}x{result.shape[0]}")
-        print(f"[TRIM] Reduction: {w}x{h} -> {result.shape[1]}x{result.shape[0]}")
-        return result
-
-    print(f"[TRIM] Pas de texte detecte - retour image originale")
+def trim_to_content(image, margin=10):
+    """Version SAFE - trim leger, ne coupe jamais le contenu"""
+    # Pour l'instant, on ne fait PAS de crop agressif
+    # On garde l'image telle quelle pour ne pas perdre d'infos
+    # TODO: Ameliorer plus tard avec une meilleure detection
     return image
 
 
